@@ -4,6 +4,7 @@ import numpy as np
 import argparse
 from pathlib import Path
 from Inpainting.CV2_Inpaint import process_video_frame
+from VideoObjectSegmentation.segmentvideo import segmentation_each_frame
 def parse_arguments():
     """
     Parse command line arguments for the video inpainting pipeline.
@@ -53,47 +54,27 @@ class VideoPipeline:
         Detect objects using selected detection model.
         """
         results = self.detector(frame)
-        return results[0].boxes.xyxy.cpu().numpy()
-    
+        boxes= results[0].boxes.xyxy.cpu().numpy()
+        return boxes if boxes.size>0 else None
 
     def segmentation_frame(self, frame):
         """
         Detect objects using selected detection model.
         """
         results = self.segmentation(frame)
+        mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+        for result in results:
+            if result.masks is not None:
+                for segment, class_id in zip(result.masks.xy, result.boxes.cls):
+                    # Check if the class is billboard
+                    # Note: Update class_id based on your model's class mapping
+                    if result.names[int(class_id)].lower() == "billboard":
+                        # Convert segment points to integer
+                        segment = segment.astype(np.int32)
+                        # Fill the mask
+                        cv2.fillPoly(mask, [segment], 255)
+        return mask
 
-
-    def inpaint_frame(self, frame, mask):
-        """
-        Inpaint frame using either replacement image or OpenCV inpainting.
-        """
-        if self.replacement_image is not None:
-            # Resize replacement image to match frame size if necessary
-            if self.replacement_image.shape != frame.shape:
-                self.replacement_image = cv2.resize(
-                    self.replacement_image, 
-                    (frame.shape[1], frame.shape[0])
-                )
-            
-            # Create inverted mask for original frame
-            inv_mask = cv2.bitwise_not(mask)
-            
-            # Extract masked regions from replacement image and original frame
-            replacement_masked = cv2.bitwise_and(
-                self.replacement_image, 
-                self.replacement_image, 
-                mask=mask
-            )
-            frame_masked = cv2.bitwise_and(
-                frame, 
-                frame, 
-                mask=inv_mask
-            )
-            
-            # Combine the images
-            return cv2.add(frame_masked, replacement_masked)
-        else:
-            return cv2.inpaint(frame, mask, 3, cv2.INPAINT_NS)
 
     def process_video(self):
         """
@@ -115,38 +96,29 @@ class VideoPipeline:
             (width, height)
         )
 
-        frame_count = 0
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
 
             # Process each frame
-            detections = self.detect_objects(frame)
-            self.segmentation_frame(frame)
+            detection = self.detect_objects(frame)
             
-            # Create mask from detections
-            masks = []
-            for box in detections:
-                mask, _, _ = self.segmentation.predict(
-                    box=box,
-                    multimask_output=False
-                )
-                masks.append(mask)
+            if detection is None:
+                continue
+            mask=self.segmentation_frame(frame)
+            list_frame=[]
+            while True:
+                ret, frame=cap.read()
+                if not ret:
+                    break
+                list_frame.append(frame)
 
-            # Combine masks if multiple objects detected
-            if masks:
-                combined_mask = np.any(masks, axis=0).astype(np.uint8) * 255
-            else:
-                combined_mask = np.zeros((height, width), dtype=np.uint8)
-
-            # Inpaint frame
-            inpainted_frame = process_video_frame(frame, )
+            list_mask=segmentation_each_frame(list_frame,mask)
+            list_mask = [mask]+list_mask
+            for frameprocessed,maskprocessed in list(zip(list_frame,list_mask)):
+                inpainted_frame = process_video_frame(frameprocessed, self.replacement_image, maskprocessed)
             out.write(inpainted_frame)
-            
-            frame_count += 1
-            if frame_count % 10 == 0:
-                print(f"Processed {frame_count} frames")
 
         cap.release()
         out.release()
